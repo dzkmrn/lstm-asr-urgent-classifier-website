@@ -1,0 +1,11 @@
+streamlit 
+flask 
+tensorflow 
+pandas 
+numpy 
+sounddevice 
+soundfile 
+pymongo 
+python-socketio 
+flask-socketio
+librosa
