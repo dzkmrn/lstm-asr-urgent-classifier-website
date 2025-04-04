@@ -1,4 +1,5 @@
 skripsi-venv
+data
 
 # Ignore all .log files
 *.log

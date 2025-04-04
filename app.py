@@ -21,6 +21,7 @@ logging.getLogger('h5py').setLevel(logging.WARNING)
 
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 import tensorflow as tf
 import numpy as np
 import soundfile as sf
@@ -33,6 +34,10 @@ os.makedirs('data', exist_ok=True)
 os.makedirs('models', exist_ok=True)
 
 app = Flask(__name__)
+CORS(app, resources={
+    r"/user_history/*": {"origins": "*", "methods": ["GET"]},
+    r"/process_audio": {"origins": "*", "methods": ["POST"]}
+})
 socketio = SocketIO(app, cors_allowed_origins="*")
 db = MongoDB()
 
@@ -43,6 +48,12 @@ try:
 except Exception as e:
     logger.error(f"Error loading model: {e}")
     raise
+
+@app.after_request
+def add_headers(response):
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    return response
 
 @app.route('/process_audio', methods=['POST'])
 def process_audio():
@@ -113,23 +124,29 @@ def process_audio():
         logger.error(f"Error processing audio: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+# Tambahkan normalisasi MFCC seperti saat training
 def extract_features(audio_data, sr=16000):
-    try:
-        logger.info("Extracting MFCC features...")
-        mfcc = librosa.feature.mfcc(
-            y=audio_data, 
-            sr=sr,
-            n_mfcc=13,
-            n_fft=2048,
-            hop_length=512
-        )
-        mfcc = mfcc.T
-        features = np.expand_dims(mfcc, axis=0)
-        logger.info(f"Features extracted successfully: shape={features.shape}")
-        return features
-    except Exception as e:
-        logger.error(f"Error extracting features: {e}")
-        raise
+    mfcc = librosa.feature.mfcc(
+        y=audio_data, 
+        sr=sr,
+        n_mfcc=13,
+        n_fft=2048,
+        hop_length=512
+    )
+    # Tambahkan normalisasi
+    mfcc = (mfcc - np.mean(mfcc)) / np.std(mfcc)
+    mfcc = mfcc.T
+    
+    # Pastikan padding sesuai dengan training
+    max_length = 94  # Sesuaikan dengan panjang saat training
+    if mfcc.shape[0] < max_length:
+        pad_width = max_length - mfcc.shape[0]
+        mfcc = np.pad(mfcc, ((0, pad_width), (0, 0)), 
+                      mode='constant')
+    else:
+        mfcc = mfcc[:max_length, :]
+    
+    return np.expand_dims(mfcc, axis=0)
 
 # Add this new route after your existing routes
 @app.route('/test_model', methods=['GET'])
@@ -149,8 +166,8 @@ def test_model():
         logger.info(f"Test features extracted: shape={features.shape}")
         
         prediction = model.predict(features, verbose=0)
-        is_urgent = bool(prediction[0][0] > 0.5)
-        confidence = float(prediction[0][0])
+        is_urgent = bool(np.argmax(prediction[0]) == 1)  # Gunakan argmax
+        confidence = float(prediction[0][1])  # Ambil probabilitas kelas 1 (darurat)
         logger.info(f"Test prediction: Urgent={is_urgent}, Confidence={confidence:.2%}")
         
         return jsonify({
@@ -169,6 +186,51 @@ def test():
     logger.info("Test endpoint called")
     return jsonify({'status': 'Server is running'})
 
+@app.route('/user_history/<user_id>', methods=['GET'])
+def get_user_history(user_id):
+    try:
+        logger.info(f"Attempting to fetch history for user: {user_id}")
+        
+        # Add database connection check
+        try:
+            db.client.admin.command('ping')
+            logger.info("Database connection active")
+        except Exception as e:
+            logger.error("Database connection failed")
+            raise
+        
+        history = db.get_user_history(user_id)
+        logger.info(f"Raw database response: {history}")
+        
+        if not history:
+            logger.info("No history found for user")
+            return jsonify([])
+            
+        # Convert MongoDB objects
+        for record in history:
+            record['_id'] = str(record['_id'])
+            record['timestamp'] = record['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+        
+        logger.info(f"Processed history: {history}")
+        return jsonify(history)
+        
+    except Exception as e:
+        logger.error(f"Error in get_user_history: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/urgent_cases', methods=['GET'])
+def get_urgent_cases():
+    try:
+        urgent_cases = db.get_all_urgent()
+        for record in urgent_cases:
+            record['_id'] = str(record['_id'])  # Convert ObjectId
+            record['timestamp'] = record['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+        return jsonify(urgent_cases)
+    except Exception as e:
+        logger.error(f"Error fetching urgent cases: {e}")
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     logger.info("Starting Flask application...")
     socketio.run(app, debug=True)
+    
