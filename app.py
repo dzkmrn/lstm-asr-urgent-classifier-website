@@ -43,17 +43,12 @@ db = MongoDB()
 
 logger.info("Loading LSTM model...")
 try:
-    model = tf.keras.models.load_model('models/lstm_model_fold_2.h5', compile=False)
+    model = tf.keras.models.load_model('models/final_model.h5', compile=False)
     logger.info("Model loaded successfully")
 except Exception as e:
     logger.error(f"Error loading model: {e}")
     raise
 
-@app.after_request
-def add_headers(response):
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    return response
 
 @app.route('/process_audio', methods=['POST'])
 def process_audio():
