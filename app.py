@@ -1,5 +1,9 @@
 import os
 import logging
+from bson import ObjectId
+import speech_recognition as sr
+import librosa.effects
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 os.environ['TF_METAL_DISABLE'] = '1'
@@ -43,7 +47,7 @@ db = MongoDB()
 
 logger.info("Loading LSTM model...")
 try:
-    model = tf.keras.models.load_model('models/final_model.h5', compile=False)
+    model = tf.keras.models.load_model('models/lstm_model_fold_3_29apr.h5', compile=False)
     logger.info("Model loaded successfully")
 except Exception as e:
     logger.error(f"Error loading model: {e}")
@@ -53,62 +57,66 @@ except Exception as e:
 @app.route('/process_audio', methods=['POST'])
 def process_audio():
     logger.info("\n=== Starting new audio processing request ===")
-    logger.info(f"Request method: {request.method}")
-    logger.info(f"Request headers: {dict(request.headers)}")
-    logger.info(f"Request files keys: {list(request.files.keys())}")
-    logger.info(f"Request form keys: {list(request.form.keys())}")
     
     if 'audio' not in request.files:
-        logger.error("No audio file received in request.files")
-        logger.error(f"Available files: {request.files}")
+        logger.error("No audio file received")
         return jsonify({'error': 'No audio file'}), 400
     
     try:
         audio_file = request.files['audio']
-        if not audio_file.filename:
-            logger.error("Empty filename received")
-            return jsonify({'error': 'Empty filename'}), 400
-            
-        logger.info(f"Audio file received: {audio_file.filename}")
-        
         user_id = request.form.get('user_id', 'default_user')
-        logger.info(f"Processing audio for user: {user_id}")
         
-        temp_path = os.path.join('data', f'temp_{user_id}.wav')
-        audio_file.save(temp_path)
-        logger.info(f"Audio saved to: {temp_path}")
+        # 1. Baca audio langsung dari memory
+        try:
+            audio_data, sr = sf.read(audio_file)
+        except Exception as e:
+            logger.error(f"Error reading audio: {str(e)}")
+            return jsonify({'error': 'Invalid audio file'}), 400
+
+        # 2. Resample jika diperlukan
+        if sr != 16000:
+            audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
+            sr = 16000
+
+        # 3. Praproses audio
+        # Trim silence
+        audio_trimmed, _ = librosa.effects.trim(audio_data, top_db=20)
         
-        # Verify file exists and size
-        file_size = os.path.getsize(temp_path)
-        logger.info(f"Saved file size: {file_size} bytes")
+        # Pad/truncate ke 3 detik (48000 samples)
+        target_length = 3 * sr
+        if len(audio_trimmed) < target_length:
+            pad_width = target_length - len(audio_trimmed)
+            audio_processed = np.pad(audio_trimmed, (0, pad_width), mode='constant')
+        elif len(audio_trimmed) > target_length:
+            audio_processed = audio_trimmed[:target_length]
+        else:
+            audio_processed = audio_trimmed
+
+        # 4. Simpan versi yang sudah diproses
+        processed_filename = f'processed_{user_id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.wav'
+        processed_path = os.path.join('data', processed_filename)
+        sf.write(processed_path, audio_processed, sr, subtype='PCM_16')
+
+        # 5. Ekstrak fitur dari audio yang sudah diproses
+        features = extract_features(audio_processed, sr)
         
-        audio_data, sr = librosa.load(temp_path, sr=16000)
-        logger.info(f"Audio loaded: duration={len(audio_data)/sr:.2f}s, sr={sr}Hz, shape={audio_data.shape}")
-        
-        features = extract_features(audio_data, sr)
-        logger.info(f"Features extracted: shape={features.shape}")
-        
-        logger.info("Making prediction...")
+        # 6. Lakukan prediksi
         prediction = model.predict(features, verbose=0)
         is_urgent = bool(prediction[0][0] > 0.5)
         confidence = float(prediction[0][0])
-        logger.info(f"Prediction complete: Urgent={is_urgent}, Confidence={confidence:.2%}")
-        
+
+        # 7. Simpan ke database
         record = {
             'user_id': user_id,
             'timestamp': datetime.now(),
-            'audio_path': temp_path,
+            'audio_path': processed_path,  # Simpan path ke file processed
             'is_urgent': is_urgent,
             'confidence': confidence
         }
         
         db.save_record(record)
-        logger.info(f"Record saved to database: {record}")
-        
         socketio.emit('new_detection', record)
-        logger.info("WebSocket notification sent")
-        
-        logger.info("=== Audio processing completed successfully ===\n")
+
         return jsonify({
             'status': 'success',
             'is_urgent': is_urgent,
@@ -154,7 +162,24 @@ def test_model():
             logger.error(f"Test file not found: {test_path}")
             return jsonify({'error': 'Test file not found'}), 404
             
-        audio_data, sr = librosa.load(test_path, sr=16000)
+        # 1. Load audio, force mono
+        audio_data, sr = librosa.load(test_path, sr=16000, mono=True)
+        logger.info(f"Audio loaded: duration={len(audio_data)/sr:.2f}s, sr={sr}Hz, shape={audio_data.shape}")
+
+        # 2. Remove silence
+        audio_data, _ = librosa.effects.trim(audio_data, top_db=30)
+        logger.info(f"After silence trimming: duration={len(audio_data)/sr:.2f}s, samples={audio_data.shape}")
+
+        # 3. Pad or truncate to exactly 3 seconds (3*16000 = 48000 samples)
+        target_length = 3 * sr  # 48000 samples for 3 seconds
+
+        if len(audio_data) < target_length:
+            pad_width = target_length - len(audio_data)
+            audio_data = np.pad(audio_data, (0, pad_width), mode='constant')
+            logger.info(f"Audio padded: new length={len(audio_data)}, should be {target_length}")
+        else:
+            audio_data = audio_data[:target_length]
+            logger.info(f"Audio truncated: new length={len(audio_data)}, should be {target_length}")
         logger.info(f"Test audio loaded: duration={len(audio_data)/sr:.2f}s, sr={sr}Hz")
         
         features = extract_features(audio_data, sr)

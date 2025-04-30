@@ -23,6 +23,10 @@ st.set_page_config(
 st.markdown("""
 <style>
     /* Main container styling */
+    .body {
+        color: black;
+    }
+    
     .main {
         background-color: #f0f2f6;
         padding: 2rem;
@@ -188,9 +192,7 @@ def user_interface():
                 # Detail Analisis
                 with st.expander("🔬 DETAIL ANALISIS LENGKAP", expanded=True):
                     cols = st.columns(3)
-                    cols[0].metric("Kata Kunci", "Tolong, Bantu")
-                    cols[1].metric("Tingkat Stress", "78%")
-                    cols[2].metric("Intensitas Suara", "85 dB")
+                    cols[0].metric("Kata Darurat", "Tolong, Jangan, Kecelakaan, Kebakaran, Maling")
                     st.map(pd.DataFrame({"lat": [-6.2000], "lon": [106.8167]}))
     
     with col2:
@@ -225,7 +227,7 @@ def handle_recording():
     try:
         with st.spinner("🎙️ Sedang merekam..."):
             fs = 16000
-            duration = 5
+            duration = 3
             audio = sd.rec(int(duration * fs), samplerate=fs, channels=1)
             sd.wait()
             
